@@ -156,6 +156,13 @@ The process is quite simple. you need to add an ENV variable and rerun the conta
 - After initialization, you will be requested to input the start and end dates in YYYY-MM-DD format. the format is very important so please enter the dates like this `2024-03-13`. Start date must be earlier than end date. The script should work for any given range, but if you encounter an error during the bulk update with large date range, please break the date range into one year chunks (maybe a few days less than one year just to be safe), and run it for each one year chunk one after another. I personally did not encounter any issue with longer date ranges, but this is just a heads up.
 - You will see the update logs in the attached shell. Please wait until it shpws `Bulk Update Complete` and exits. It might take a long time depending on the given duration and 150 API call limit per hour.
 - You are done with the bulk update at this point. Remove the ENV variable from the compose or change it to `AUTO_DATE_RANGE=True`, save the compose file and run `docker compose up` to resume daily update.
+  
+#### Non-interactive Procedure
+
+You can run the bulk update in non-interactive mode by setting these additoinal environment variables.
+
+- `MANUAL_START_DATE` optional, in YYYY-MM-DD format, if you want to bulk update only from specific date
+- `MANUAL_END_DATE` optional, in YYYY-MM-DD format, if you want to bulk update until a specific date
 
 ## Backup Database
 
