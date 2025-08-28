@@ -349,7 +349,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                         "Device": DEVICENAME
                     },
                     "fields": {
-                        "value": data["value"]["breathingRate"]
+                        "value": float(data["value"]["breathingRate"])
                     }
                 })
         logging.info("Recorded BR for date " + start_date_str + " to " + end_date_str)
@@ -793,5 +793,6 @@ if SCHEDULE_AUTO_UPDATE:
         time.sleep(30)
         update_working_dates()
         
+
 
 
