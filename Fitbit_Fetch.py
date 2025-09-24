@@ -375,7 +375,11 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
     else:
         logging.error("Recording failed : Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
 
-    spo2_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/spo2/date/' + start_date_str + '/' + end_date_str + '/all.json')
+    try:
+        spo2_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/spo2/date/' + start_date_str + '/' + end_date_str + '/all.json')
+    except requests.exceptions.HTTPError as e:
+        logging.error(f"{e}")
+        spo2_data_list = None
     if spo2_data_list != None:
         for days in spo2_data_list:
             data = days["minutes"]
