@@ -595,9 +595,9 @@ def get_daily_data_limit_none(start_date_str, end_date_str):
                         "Device": DEVICENAME
                     },
                     "fields": {
-                        "avg": data["value"]["avg"],
-                        "max": data["value"]["max"],
-                        "min": data["value"]["min"]
+                        "avg": float(data["value"]["avg"]) if data["value"]["avg"] else None,
+                        "max": float(data["value"]["max"]) if data["value"]["max"] else None,
+                        "min": float(data["value"]["min"]) if data["value"]["min"] else None
                     }
                 })
         logging.info("Recorded Avg SPO2 for date " + start_date_str + " to " + end_date_str)
