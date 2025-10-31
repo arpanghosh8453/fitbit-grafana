@@ -329,8 +329,8 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                         "Device": DEVICENAME
                     },
                     "fields": {
-                        "dailyRmssd": data["value"]["dailyRmssd"],
-                        "deepRmssd": data["value"]["deepRmssd"]
+                        "dailyRmssd": float(data["value"]["dailyRmssd"]) if data["value"]["dailyRmssd"] else None,
+                        "deepRmssd": float(data["value"]["deepRmssd"]) if data["value"]["deepRmssd"] else None
                     }
                 })
         logging.info("Recorded HRV for date " + start_date_str + " to " + end_date_str)
