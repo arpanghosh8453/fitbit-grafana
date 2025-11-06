@@ -581,6 +581,24 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
     else:
         logging.error("Recording failed : RHR and HR zones for date " + start_date_str + " to " + end_date_str)
 
+    HR_zone_minutes_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/activities/active-zone-minutes/date/' + start_date_str + '/' + end_date_str + '.json').get("activities-active-zone-minutes")
+    if HR_zone_minutes_list != None:
+        for data in HR_zone_minutes_list:
+            log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
+            utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
+            if data.get("value"):
+                collected_records.append({
+                        "measurement": "HR zones",
+                        "time": utc_time,
+                        "tags": {
+                            "Device": DEVICENAME
+                        },
+                        "fields": data["value"]
+                    })
+        logging.info("Recorded HR zone minutes for date " + start_date_str + " to " + end_date_str)
+    else:
+        logging.error("Recording failed : HR zone minutes for date " + start_date_str + " to " + end_date_str)
+
 # records SPO2 single days for the whole given period - 1 query
 def get_daily_data_limit_none(start_date_str, end_date_str):
     data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/spo2/date/' + start_date_str + '/' + end_date_str + '.json')
