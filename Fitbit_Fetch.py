@@ -601,7 +601,11 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
 
 # records SPO2 single days for the whole given period - 1 query
 def get_daily_data_limit_none(start_date_str, end_date_str):
-    data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/spo2/date/' + start_date_str + '/' + end_date_str + '.json')
+    try:
+        data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/spo2/date/' + start_date_str + '/' + end_date_str + '.json')
+    except requests.exceptions.HTTPError as e:
+        logging.error(f"{e}")
+        data_list = None
     if data_list != None:
         for data in data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
