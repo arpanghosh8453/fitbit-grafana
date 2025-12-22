@@ -368,7 +368,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
                         "Device": DEVICENAME
                     },
                     "fields": {
-                        "RelativeValue": temp_record["value"]["nightlyRelative"]
+                        "RelativeValue": float(temp_record["value"]["nightlyRelative"])
                     }
                 })
         logging.info("Recorded Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
