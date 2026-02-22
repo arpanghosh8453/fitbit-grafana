@@ -2,9 +2,12 @@
 <img src="./extra/Fitbit_dashboard.png" width="500" height="160" align="center">
 </p>
 
-# Fitbit Fetch script and Influxdb Grafana integration
+# Grafana Dashboard for Fitbit
 
 A script to fetch data from Fitbit servers using their API and store the data in a local influxdb database.
+
+> [!IMPORTANT]
+> *Fitbit is a registered trademark of Google LLC. Grafana is a registered trademark of Grafana Labs. This project is an independent, open-source tool and is not affiliated with, endorsed by, sponsored by, or approved by Google LLC or Grafana Labs.*
 
 ## Dashboard Example
 
