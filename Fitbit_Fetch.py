@@ -337,7 +337,15 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
     else:
         logging.error("Recording failed HRV for date " + start_date_str + " to " + end_date_str)
 
-    br_data_list = request_data_from_fitbit('https://api.fitbit.com/1/user/-/br/date/' + start_date_str + '/' + end_date_str + '.json').get("br")
+    try:
+        br_response = request_data_from_fitbit('https://api.fitbit.com/1/user/-/br/date/' + start_date_str + '/' + end_date_str + '.json')
+        br_data_list = br_response.get("br") if br_response else None
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 403:
+            logging.warning("Skipping BR for date " + start_date_str + " to " + end_date_str + " due to missing permission (HTTP 403)")
+            br_data_list = None
+        else:
+            raise
     if br_data_list != None:
         for data in br_data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
