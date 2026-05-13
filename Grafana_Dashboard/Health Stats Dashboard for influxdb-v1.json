@@ -1914,7 +1914,7 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "last"
+            "lastNotNull"
           ],
           "fields": "",
           "values": false
@@ -4134,7 +4134,7 @@
       "pluginVersion": "11.6.0",
       "targets": [
         {
-          "alias": "Light Activity",
+          "alias": "Fat Burn (AZM)",
           "datasource": {
             "type": "influxdb",
             "uid": "${DS_HEALTH_STATS}"
@@ -4153,8 +4153,48 @@
               "type": "fill"
             }
           ],
-          "hide": false,
-          "measurement": "Activity Minutes",
+          "measurement": "HR zones",
+          "orderByTime": "ASC",
+          "policy": "default",
+          "refId": "A",
+          "resultFormat": "time_series",
+          "select": [
+            [
+              {
+                "params": [
+                  "Fat Burn"
+                ],
+                "type": "field"
+              },
+              {
+                "params": [],
+                "type": "max"
+              }
+            ]
+          ],
+          "tags": []
+        },
+        {
+          "alias": "Cardio (AZM)",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_HEALTH_STATS}"
+          },
+          "groupBy": [
+            {
+              "params": [
+                "$__interval"
+              ],
+              "type": "time"
+            },
+            {
+              "params": [
+                "null"
+              ],
+              "type": "fill"
+            }
+          ],
+          "measurement": "HR zones",
           "orderByTime": "ASC",
           "policy": "default",
           "refId": "B",
@@ -4163,63 +4203,20 @@
             [
               {
                 "params": [
-                  "minutesLightlyActive"
+                  "Cardio"
                 ],
                 "type": "field"
               },
               {
                 "params": [],
-                "type": "distinct"
-              }
-            ]
-          ],
-          "tags": [],
-          "tz": "$TimeZone"
-        },
-        {
-          "alias": "Fair Activity",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_HEALTH_STATS}"
-          },
-          "groupBy": [
-            {
-              "params": [
-                "$__interval"
-              ],
-              "type": "time"
-            },
-            {
-              "params": [
-                "null"
-              ],
-              "type": "fill"
-            }
-          ],
-          "measurement": "Activity Minutes",
-          "orderByTime": "ASC",
-          "policy": "default",
-          "queryType": "randomWalk",
-          "refId": "A",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "minutesFairlyActive"
-                ],
-                "type": "field"
-              },
-              {
-                "params": [],
-                "type": "distinct"
+                "type": "max"
               }
             ]
           ],
           "tags": []
         },
         {
-          "alias": "Intense Activity",
+          "alias": "Peak (AZM)",
           "datasource": {
             "type": "influxdb",
             "uid": "${DS_HEALTH_STATS}"
@@ -4238,8 +4235,7 @@
               "type": "fill"
             }
           ],
-          "hide": false,
-          "measurement": "Activity Minutes",
+          "measurement": "HR zones",
           "orderByTime": "ASC",
           "policy": "default",
           "refId": "C",
@@ -4248,13 +4244,54 @@
             [
               {
                 "params": [
-                  "minutesVeryActive"
+                  "Peak"
                 ],
                 "type": "field"
               },
               {
                 "params": [],
-                "type": "distinct"
+                "type": "max"
+              }
+            ]
+          ],
+          "tags": []
+        },
+        {
+          "alias": "Sedentary",
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_HEALTH_STATS}"
+          },
+          "groupBy": [
+            {
+              "params": [
+                "$__interval"
+              ],
+              "type": "time"
+            },
+            {
+              "params": [
+                "null"
+              ],
+              "type": "fill"
+            }
+          ],
+          "measurement": "Activity Minutes",
+          "orderByTime": "ASC",
+          "policy": "default",
+          "refId": "D",
+          "resultFormat": "time_series",
+          "select": [
+            [
+              {
+                "params": [
+                  "minutesSedentary"
+                ],
+                "type": "field"
+              },
+              {
+                "params": [],
+                "type": "max"
               }
             ]
           ],
@@ -5539,14 +5576,52 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Time"
+              "options": "duration"
             },
             "properties": [
               {
-                "id": "custom.cellOptions",
-                "value": {
-                  "type": "color-text"
-                }
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "distance"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "lengthm"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AverageHeartRate"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "displayName",
+                "value": "Avg HR"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "calories"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
               }
             ]
           }
@@ -5582,7 +5657,6 @@
       "pluginVersion": "11.6.0",
       "targets": [
         {
-          "alias": "Walk",
           "datasource": {
             "type": "influxdb",
             "uid": "${DS_HEALTH_STATS}"
@@ -5591,10 +5665,10 @@
           "measurement": "Activity Records",
           "orderByTime": "DESC",
           "policy": "default",
-          "query": "SELECT \"duration\" FROM \"Activity Records\" WHERE (\"ActivityName\" = 'Walk') AND $timeFilter ORDER BY time DESC",
+          "query": "SELECT \"ActivityName\", \"duration\", \"calories\", \"AverageHeartRate\", \"distance\", \"steps\" FROM \"Activity Records\" WHERE $timeFilter ORDER BY time DESC",
           "rawQuery": true,
           "refId": "A",
-          "resultFormat": "time_series",
+          "resultFormat": "table",
           "select": [
             [
               {
@@ -5605,79 +5679,7 @@
               }
             ]
           ],
-          "tags": [
-            {
-              "key": "ActivityName",
-              "operator": "=",
-              "value": "Walk"
-            }
-          ]
-        },
-        {
-          "alias": "Swimming",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_HEALTH_STATS}"
-          },
-          "groupBy": [],
-          "hide": false,
-          "measurement": "Activity Records",
-          "orderByTime": "DESC",
-          "policy": "default",
-          "query": "SELECT \"calories\" FROM \"Activity Records\" WHERE (\"ActivityName\" = 'Walk') ",
-          "rawQuery": false,
-          "refId": "B",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "duration"
-                ],
-                "type": "field"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "ActivityName",
-              "operator": "=",
-              "value": "Swim"
-            }
-          ]
-        },
-        {
-          "alias": "Biking",
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_HEALTH_STATS}"
-          },
-          "groupBy": [],
-          "hide": false,
-          "measurement": "Activity Records",
-          "orderByTime": "DESC",
-          "policy": "default",
-          "query": "SELECT \"calories\" FROM \"Activity Records\" WHERE (\"ActivityName\" = 'Walk') ",
-          "rawQuery": false,
-          "refId": "C",
-          "resultFormat": "time_series",
-          "select": [
-            [
-              {
-                "params": [
-                  "duration"
-                ],
-                "type": "field"
-              }
-            ]
-          ],
-          "tags": [
-            {
-              "key": "ActivityName",
-              "operator": "=",
-              "value": "Outdoor Bike"
-            }
-          ]
+          "tags": []
         }
       ],
       "timeFrom": "1w",
