@@ -618,10 +618,41 @@ def get_user_timezone_name():
     return "UTC"
 
 
+def discover_google_device_name():
+    """Inspect a few popular data types and return the first dataSource.device.displayName
+    we can find (e.g. "Versa 4"). Google attaches device metadata to every data point even
+    though it does not expose battery telemetry. Returns None if nothing usable is found."""
+    for data_type in ("heart-rate", "steps", "daily-resting-heart-rate", "weight", "exercise"):
+        try:
+            resp = request_google_data_points_list(
+                data_type, params={"pageSize": 1}, suppress_http_error_log=True
+            )
+        except requests.exceptions.HTTPError:
+            continue
+        if not isinstance(resp, dict):
+            continue
+        for dp in resp.get("dataPoints", []):
+            device = (dp.get("dataSource") or {}).get("device") or {}
+            name = device.get("displayName")
+            if name:
+                return name.strip()
+    return None
+
+
 if LOCAL_TIMEZONE == "Automatic":
     LOCAL_TIMEZONE = pytz.timezone(get_user_timezone_name())
 else:
     LOCAL_TIMEZONE = pytz.timezone(LOCAL_TIMEZONE)
+
+# Auto-detect the device name from the Google Health API if the user did not set
+# DEVICENAME explicitly. Falls back silently to the placeholder if discovery fails.
+if HEALTH_API_PROVIDER == "google" and DEVICENAME == "Your_Device_Name":
+    discovered_device_name = discover_google_device_name()
+    if discovered_device_name:
+        logging.info("Auto-detected Google device displayName: %s (override with DEVICENAME env var)", discovered_device_name)
+        DEVICENAME = discovered_device_name
+    else:
+        logging.info("Could not auto-detect device displayName from Google Health API; keeping default '%s'", DEVICENAME)
 
 # %% [markdown]
 # ## Selecting Dates for update
