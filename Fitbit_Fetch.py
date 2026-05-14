@@ -1122,6 +1122,19 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         logging.error("Recording failed : weight and BMI for date " + start_date_str + " to " + end_date_str)
 
 
+# Anchor a sleep session to the day the user conceptually went to bed, so it buckets
+# correctly in Grafana regardless of how late they fell asleep or which timezone the
+# dashboard is viewed in. Rule: if start time in local TZ is < noon (post-midnight
+# sleep), the session belongs to the previous local day; otherwise the local day.
+# Returns ISO at 12:00 UTC of that sleep date — stable for any viewer TZ within ±12h.
+def compute_sleep_date_anchor_ts(start_dt, local_tz):
+    if start_dt.tzinfo is None:
+        start_dt = local_tz.localize(start_dt)
+    local_dt = start_dt.astimezone(local_tz)
+    sleep_date = local_dt.date() - timedelta(days=1) if local_dt.hour < 12 else local_dt.date()
+    return datetime(sleep_date.year, sleep_date.month, sleep_date.day, 12, 0, 0, tzinfo=pytz.utc).isoformat()
+
+
 # Sleep data — limit 100 days
 def get_daily_data_limit_100d(start_date_str, end_date_str):
     # Google sleep endpoint: data_type = "sleep", session record
@@ -1162,9 +1175,15 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
 
             is_main_sleep = sleep.get("metadata", {}).get("processed", True)
 
+            try:
+                start_dt_utc = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                summary_ts = compute_sleep_date_anchor_ts(start_dt_utc, LOCAL_TIMEZONE)
+            except (ValueError, AttributeError):
+                summary_ts = ts
+
             collected_records.append({
                 "measurement": "Sleep Summary",
-                "time": ts,
+                "time": summary_ts,
                 "tags": {"Device": DEVICENAME, "isMainSleep": is_main_sleep},
                 "fields": {
                     "efficiency":            efficiency,
@@ -1236,7 +1255,7 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
     if sleep_data != None:
         for record in sleep_data:
             log_time = datetime.fromisoformat(record["startTime"])
-            utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
+            summary_time = compute_sleep_date_anchor_ts(log_time, LOCAL_TIMEZONE)
             try:
                 minutesLight = record['levels']['summary']['light']['minutes']
                 minutesREM   = record['levels']['summary']['rem']['minutes']
@@ -1245,10 +1264,10 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                 minutesLight = record['levels']['summary']['asleep']['minutes']
                 minutesREM   = record['levels']['summary']['restless']['minutes']
                 minutesDeep  = 0
- 
+
             collected_records.append({
                     "measurement":  "Sleep Summary",
-                    "time": utc_time,
+                    "time": summary_time,
                     "tags": {
                         "Device": DEVICENAME,
                         "isMainSleep": record["isMainSleep"],
