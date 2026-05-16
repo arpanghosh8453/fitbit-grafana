@@ -46,16 +46,26 @@ Google uses URL scopes. Use only what you need. Typical read-only scopes for thi
 1. Open Google Cloud Console:
    - https://console.cloud.google.com
 2. Create or select a project.
-3. Enable **Google Health API** for the project from services.
-4. Configure OAuth consent screen:
-   - Set app information
-   - Add required test users who can use the app (add yourself) if app is in Testing mode (from the Audience tab of sidebar) or make the app public. Otherwise you will get an access denied error.
+3. Enable **Google Health API** for the project:
+   - Go to **APIs & Services** -> **Library**
+   - Search for **Google Health API**
+   - Open it and click **Enable**
+4. Configure the OAuth consent screen:
+   - Go to **Google Auth Platform**
+   - Configure the app information under **Branding**
+   - Add the required Google Health API scopes under **Data Access**, if prompted
+   - If the app is in **Testing** mode, add all users who need access under **Audience** -> **Test users**.
+     Make sure to add yourself. Otherwise, the OAuth flow can fail with an access denied error.
 5. Create OAuth credentials:
-   - APIs & Services -> Credentials -> Create Credentials -> OAuth client ID
-   - Application type: Desktop app
-6. Add redirect URI exactly:
-   - `http://localhost:8080`
-7. Save and copy:
+   - Go to **Google Auth Platform** -> **Clients**
+   - Click **Create client**
+   - Application type: **Web application**
+   - Choose a descriptive name, for example `Google Health Local OAuth Client`
+6. Add the redirect URI:
+   - Under **Authorized redirect URIs**, click **Add URI**
+   - Add exactly:
+     - `http://localhost:8080`
+7. Save the client and copy:
    - `GOOGLE_CLIENT_ID`
    - `GOOGLE_CLIENT_SECRET`
 
