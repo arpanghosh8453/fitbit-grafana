@@ -1325,15 +1325,17 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         "Cardio":   int(extract_first_numeric(azm.get("sumInCardioHeartZone"))  or 0),
                         "Peak":     int(extract_first_numeric(azm.get("sumInPeakHeartZone"))    or 0),
                     }
-                    if any(v > 0 for v in fields.values()):
-                        ts = LOCAL_TIMEZONE.localize(current).astimezone(pytz.utc).isoformat()
-                        collected_records.append({
-                            "measurement": "HR zones",
-                            "time": ts,
-                            "tags": {"Device": DEVICENAME},
-                            "fields": fields,
-                        })
-                        inserted_count += 1
+                    # Always write a row, even if all zeros — matches the upstream Fitbit path
+                    # and gives Grafana a continuous time series so short ranges (e.g. last 7d)
+                    # render proper daily bars instead of collapsing to a single label.
+                    ts = LOCAL_TIMEZONE.localize(current).astimezone(pytz.utc).isoformat()
+                    collected_records.append({
+                        "measurement": "HR zones",
+                        "time": ts,
+                        "tags": {"Device": DEVICENAME},
+                        "fields": fields,
+                    })
+                    inserted_count += 1
             except Exception as e:
                 logging.warning("Google active-zone-minutes rollup failed for %s: %s", current.strftime("%Y-%m-%d"), str(e))
             current += timedelta(days=1)
