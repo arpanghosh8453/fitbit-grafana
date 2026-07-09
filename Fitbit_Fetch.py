@@ -488,9 +488,24 @@ def refresh_google_tokens(client_id, client_secret, refresh_token):
     logging.info("Google token refresh successful!")
     return access_token, new_refresh_token
 
+
+def invalid_token_file_error():
+    return ValueError(
+        f"Token file at {TOKEN_FILE_PATH} is corrupted or invalid. Expected a valid JSON in format:\n"
+        '{ "refresh_token": "your_refresh_token" }'
+    )
+
+
 def load_tokens_from_file():
     with open(TOKEN_FILE_PATH, "r") as file:
-        tokens = json.load(file)
+        try:
+            tokens = json.load(file)
+        except json.JSONDecodeError as e:
+            raise invalid_token_file_error() from e
+
+        if not isinstance(tokens, dict):
+            raise invalid_token_file_error()
+
         provider = (tokens.get("provider") or "fitbit").lower()
         return tokens.get("access_token"), tokens.get("refresh_token"), provider
 
