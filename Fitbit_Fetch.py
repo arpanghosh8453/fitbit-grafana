@@ -316,24 +316,50 @@ def get_google_datapoints_for_date(data_type, date_str, page_size=10000):
         # Daily and unsupported data types often reject member-based filters.
         filters_to_try = []
 
-    response = None
+    # Google caps responses at ~5000 points per page regardless of pageSize, so we must
+    # follow nextPageToken to avoid silently dropping data (e.g. HR samples earlier in the day).
+    def _paginate(extra_params):
+        all_points = []
+        page_token = None
+        first = True
+        for _ in range(50):  # safety cap; one day of HR is ~17k samples → ~4 pages
+            params = dict(extra_params)
+            params["pageSize"] = page_size
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                resp = request_google_data_points_list(
+                    data_type, params=params, suppress_http_error_log=first
+                )
+            except requests.exceptions.HTTPError:
+                if first:
+                    raise
+                logging.warning("Pagination interrupted for %s; keeping %d points", data_type, len(all_points))
+                break
+            first = False
+            if not isinstance(resp, dict):
+                break
+            all_points.extend(resp.get("dataPoints", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return all_points
+
+    points = None
     used_server_filter = False
     for filter_expr in filters_to_try:
         try:
-            response = request_google_data_points_list(
-                data_type,
-                params={"pageSize": page_size, "filter": filter_expr},
-                suppress_http_error_log=True,
-            )
+            points = _paginate({"filter": filter_expr})
             used_server_filter = True
             break
         except requests.exceptions.HTTPError:
             continue
 
-    if response is None:
-        response = request_google_data_points_list(data_type, params={"pageSize": page_size})
-
-    points = response.get("dataPoints", []) if isinstance(response, dict) else []
+    if points is None:
+        try:
+            points = _paginate({})
+        except requests.exceptions.HTTPError:
+            points = []
     filtered = []
     for data_point in points:
         ts = parse_google_datapoint_timestamp(data_point, data_type)
@@ -765,13 +791,216 @@ def get_intraday_data_limit_1d(date_str, measurement_list):
             logging.info("Recorded " +  measurement[1] + " intraday for date " + date_str)
         else:
             logging.error("Recording failed : " +  measurement[1] + " intraday for date " + date_str)
-
-# Max range is 30 days, records BR, SPO2 Intraday, skin temp and HRV - 4 queries
+# =============================================================================
+# PATCH: Google Health API mappings for previously-skipped data types
+#
+# Drop-in replacements for three functions in Fitbit_Fetch.py:
+#   - get_daily_data_limit_30d   → HRV, Breathing Rate, Skin Temp, SPO2 intraday, Weight/BMI
+#   - get_daily_data_limit_100d  → Sleep Summary + Sleep Levels
+#   - get_daily_data_limit_365d  → Resting HR, HR Zones, Activity Minutes, Steps/Calories/Distance
+#
+# All Google endpoints used are from the official Google Health API docs:
+# https://developers.google.com/health/data-types
+#
+# Measurement names are kept identical to the Fitbit originals so the
+# existing Grafana dashboard works without changes.
+# =============================================================================
+ 
+# Max range is 30 days — HRV, BR, Skin Temp, SPO2 intraday, Weight/BMI
 def get_daily_data_limit_30d(start_date_str, end_date_str):
     if HEALTH_API_PROVIDER == "google":
-        logging.warning("Google mapping for 30-day grouped datasets (HRV/BR/SkinTemp/SPO2 intraday/weight) is not finalized yet. Skipping this batch.")
-        return
+ 
+        # --- HRV (daily-heart-rate-variability) ---
+        # Google field: dailyHeartRateVariability → { averageHeartRateVariabilityMilliseconds, deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds, nonRemHeartRateBeatsPerMinute, entropy }
+        try:
+            points = get_google_datapoints_for_date_range("daily-heart-rate-variability", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google HRV fetch failed: %s", str(e))
+            points = []
+        inserted_count = 0
+        for data_point, ts in points:
+            hrv_fields = data_point.get("dailyHeartRateVariability", {})
+            rmssd      = extract_first_numeric(hrv_fields.get("averageHeartRateVariabilityMilliseconds"))
+            deep_rmssd = extract_first_numeric(hrv_fields.get("deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds"))
+            non_rem_hr = extract_first_numeric(hrv_fields.get("nonRemHeartRateBeatsPerMinute"))
+            entropy    = extract_first_numeric(hrv_fields.get("entropy"))
+            if rmssd is None and deep_rmssd is None:
+                continue
+            fields = {}
+            if rmssd is not None:
+                fields["dailyRmssd"] = rmssd        # matches existing Grafana panel
+            if deep_rmssd is not None:
+                fields["deepRmssd"] = deep_rmssd    # matches existing Grafana panel
+            if non_rem_hr is not None:
+                fields["nonRemHeartRateBpm"] = non_rem_hr   # new — Google-only field
+            if entropy is not None:
+                fields["entropy"] = entropy                  # new — Google-only field
+            collected_records.append({
+                "measurement": "HRV",
+                "time": ts,
+                "tags": {"Device": DEVICENAME},
+                "fields": fields,
+            })
+            inserted_count += 1
+        if inserted_count:
+            logging.info("Recorded HRV for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No HRV records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        # --- Breathing Rate (daily-respiratory-rate) ---
+        # Google field: dailyRespiratoryRate → { value } (breaths/min)
+        try:
+            points = get_google_datapoints_for_date_range("daily-respiratory-rate", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google Breathing Rate fetch failed: %s", str(e))
+            points = []
+        inserted_count = 0
+        for data_point, ts in points:
+            br_fields = data_point.get("dailyRespiratoryRate", {})
+            value = extract_first_numeric(br_fields.get("breathsPerMinute"))
+            if value is None:
+                continue
+            collected_records.append({
+                "measurement": "BreathingRate",
+                "time": ts,
+                "tags": {"Device": DEVICENAME},
+                "fields": {"value": float(value)},
+            })
+            inserted_count += 1
+        if inserted_count:
+            logging.info("Recorded BR for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No Breathing Rate records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        # --- Skin Temperature Variation (daily-sleep-temperature-derivations) ---
+        # Google field: dailySleepTemperatureDerivations → { nightlyRelative }
+        try:
+            points = get_google_datapoints_for_date_range("daily-sleep-temperature-derivations", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google Skin Temp fetch failed: %s", str(e))
+            points = []
+        inserted_count = 0
+        for data_point, ts in points:
+            temp_fields = data_point.get("dailySleepTemperatureDerivations", {})
+            nightly  = extract_first_numeric(temp_fields.get("nightlyTemperatureCelsius"))
+            baseline = extract_first_numeric(temp_fields.get("baselineTemperatureCelsius"))
+            relative = round(nightly - baseline, 4) if nightly is not None and baseline is not None else None
+            stddev   = extract_first_numeric(temp_fields.get("relativeNightlyStddev30dCelsius"))
+            if relative is None:
+                continue
+            fields = {"RelativeValue": relative}
+            if stddev is not None:
+                fields["stddev30d"] = stddev
+            if nightly is not None:
+                fields["nightlyTemperatureCelsius"] = nightly
+            if baseline is not None:
+                fields["baselineTemperatureCelsius"] = baseline
+            collected_records.append({
+                "measurement": "Skin Temperature Variation",
+                "time": ts,
+                "tags": {"Device": DEVICENAME},
+                "fields": fields,
+            })
+            inserted_count += 1
+        if inserted_count:
+            logging.info("Recorded Skin Temperature Variation for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No Skin Temp records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        # --- SPO2 Intraday (oxygen-saturation — instantaneous samples) ---
+        # Google field: oxygenSaturation → { percentage }
+        # Uses sample_time filter (same as heart-rate), walks day by day
+        try:
+            points = get_google_datapoints_for_date_range("oxygen-saturation", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google SPO2 intraday fetch failed: %s", str(e))
+            points = []
+        inserted_count = 0
+        for data_point, ts in points:
+            spo2_fields = data_point.get("oxygenSaturation", {})
+            value = extract_first_numeric(spo2_fields.get("percentage")) or extract_first_numeric(spo2_fields)
+            if value is None:
+                continue
+            collected_records.append({
+                "measurement": "SPO2_Intraday",
+                "time": ts,
+                "tags": {"Device": DEVICENAME},
+                "fields": {"value": float(value)},
+            })
+            inserted_count += 1
+        if inserted_count:
+            logging.info("Recorded SPO2 intraday for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No SPO2 intraday records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        # --- Weight and BMI (weight) ---
+        # Google field: weight → { weightGrams }. BMI is NOT exposed by the weight endpoint,
+        # so we fetch the latest height (data type "height" → heightMillimeters) and compute
+        # BMI = weight_kg / height_m^2.
+        # Deduplicates by timestamp — Withings via Health Connect produces duplicate entries
+        try:
+            points = get_google_datapoints_for_date_range("weight", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google Weight fetch failed: %s", str(e))
+            points = []
 
+        height_meters = None
+        try:
+            height_response = request_google_data_points_list("height", params={"pageSize": 100})
+            latest_mm, latest_time = None, None
+            for hp in height_response.get("dataPoints", []) if isinstance(height_response, dict) else []:
+                h = hp.get("height", {})
+                mm = extract_first_numeric(h.get("heightMillimeters"))
+                physical = (h.get("sampleTime") or {}).get("physicalTime")
+                if mm is not None and physical and (latest_time is None or physical > latest_time):
+                    latest_mm, latest_time = mm, physical
+            if latest_mm is not None:
+                height_meters = latest_mm / 1000.0
+                logging.info("Fetched latest height for BMI: %.3f m (recorded at %s)", height_meters, latest_time)
+        except Exception as e:
+            logging.warning("Google height fetch failed (BMI will be skipped): %s", str(e))
+
+        inserted_count = 0
+        seen_weight_timestamps = set()
+        for data_point, ts in points:
+            if ts in seen_weight_timestamps:
+                continue
+            seen_weight_timestamps.add(ts)
+            weight_fields = data_point.get("weight", {})
+            # API returns weightGrams, convert to kg
+            weight_grams = extract_first_numeric(weight_fields.get("weightGrams"))
+            weight_kg = weight_grams / 1000 if weight_grams is not None else None
+            # Store as pounds to match Fitbit API behaviour (dashboard converts lbs→kg)
+            weight_lbs = weight_kg * 2.205 if weight_kg is not None else None
+            bmi = round(weight_kg / (height_meters ** 2), 2) if (weight_kg is not None and height_meters) else None
+            if weight_lbs is not None:
+                collected_records.append({
+                    "measurement": "weight",
+                    "time": ts,
+                    "tags": {"Device": DEVICENAME},
+                    "fields": {
+                        "value": float(weight_lbs),      # pounds — matches existing Grafana dashboard
+                        "weightKg": float(weight_kg),     # kg — for future metric display
+                        "weightLbs": float(weight_lbs),   # explicit lbs field
+                    },
+                })
+                inserted_count += 1
+            if bmi is not None:
+                collected_records.append({
+                    "measurement": "bmi",
+                    "time": ts,
+                    "tags": {"Device": DEVICENAME},
+                    "fields": {"value": float(bmi)},
+                })
+                inserted_count += 1
+        if inserted_count:
+            logging.info("Recorded weight and BMI for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No Weight/BMI records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        return  # ← Google path done, skip Fitbit code below
+ 
+    # --- Original Fitbit path (unchanged) ---
     hrv_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/hrv/date/{start_date_str}/{end_date_str}.json").get('hrv')
     if hrv_data_list != None:
         for data in hrv_data_list:
@@ -791,7 +1020,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         logging.info("Recorded HRV for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed HRV for date " + start_date_str + " to " + end_date_str)
-
+ 
     try:
         br_response = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/br/date/{start_date_str}/{end_date_str}.json")
         br_data_list = br_response.get("br") if br_response else None
@@ -818,7 +1047,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         logging.info("Recorded BR for date " + start_date_str + " to " + end_date_str)
     else:
         logging.warning("Records not found : BR for date " + start_date_str + " to " + end_date_str)
-
+ 
     skin_temp_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/temp/skin/date/{start_date_str}/{end_date_str}.json").get("tempSkin")
     if skin_temp_data_list != None:
         for temp_record in skin_temp_data_list:
@@ -837,7 +1066,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         logging.info("Recorded Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : Skin Temperature Variation for date " + start_date_str + " to " + end_date_str)
-
+ 
     try:
         spo2_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/spo2/date/{start_date_str}/{end_date_str}/all.json")
     except requests.exceptions.HTTPError as e:
@@ -846,7 +1075,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
     if spo2_data_list != None:
         for days in spo2_data_list:
             data = days["minutes"]
-            for record in data: 
+            for record in data:
                 log_time = datetime.fromisoformat(record["minute"])
                 utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
                 collected_records.append({
@@ -862,7 +1091,7 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
         logging.info("Recorded SPO2 intraday for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : SPO2 intraday for date " + start_date_str + " to " + end_date_str)
-
+ 
     weight_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/body/log/weight/date/{start_date_str}/{end_date_str}.json").get("weight")
     if weight_data_list != None:
         for entry in weight_data_list:
@@ -892,26 +1121,131 @@ def get_daily_data_limit_30d(start_date_str, end_date_str):
     else:
         logging.error("Recording failed : weight and BMI for date " + start_date_str + " to " + end_date_str)
 
-# Only for sleep data - limit 100 days - 1 query
-def get_daily_data_limit_100d(start_date_str, end_date_str):
-    if HEALTH_API_PROVIDER == "google":
-        logging.warning("Google mapping for sleep detail dataset is not finalized yet. Skipping this batch.")
-        return
 
+# Sleep data — limit 100 days
+def get_daily_data_limit_100d(start_date_str, end_date_str):
+    # Google sleep endpoint: data_type = "sleep", session record
+    # Google structure differs significantly from Fitbit API:
+    #   sleep.summary.minutesAsleep/minutesAwake/minutesInSleepPeriod/stagesSummary
+    #   sleep.stages[] → { startTime, endTime, type: AWAKE/LIGHT/DEEP/REM }
+    #   sleep.interval → { startTime, endTime }
+    # No efficiency field — computed as minutesAsleep/minutesInSleepPeriod * 100
+    # All minute values returned as strings, not ints
+    if HEALTH_API_PROVIDER == "google":
+        sleep_level_mapping = {'AWAKE': 3, 'REM': 2, 'LIGHT': 1, 'DEEP': 0, 'UNKNOWN': 4}
+        try:
+            points = get_google_datapoints_for_date_range("sleep", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google Sleep fetch failed: %s", str(e))
+            points = []
+        inserted_count = 0
+        for data_point, ts in points:
+            sleep = data_point.get("sleep", {})
+            if not sleep:
+                continue
+
+            summary = sleep.get("summary", {})
+            stages_summary = summary.get("stagesSummary", [])
+            stages_map = {s["type"]: int(s.get("minutes", 0)) for s in stages_summary}
+
+            minutes_asleep      = int(summary.get("minutesAsleep", 0))
+            minutes_awake       = int(summary.get("minutesAwake", 0))
+            minutes_in_period   = int(summary.get("minutesInSleepPeriod", 0))
+            minutes_after_wakeup = int(summary.get("minutesAfterWakeUp", 0))
+            minutes_to_fall     = int(summary.get("minutesToFallAsleep", 0))
+            minutes_light       = stages_map.get("LIGHT", 0)
+            minutes_rem         = stages_map.get("REM", 0)
+            minutes_deep        = stages_map.get("DEEP", 0)
+
+            # Compute efficiency: minutesAsleep / minutesInSleepPeriod * 100
+            efficiency = round(minutes_asleep / minutes_in_period * 100) if minutes_in_period > 0 else 0
+
+            is_main_sleep = sleep.get("metadata", {}).get("processed", True)
+
+            collected_records.append({
+                "measurement": "Sleep Summary",
+                "time": ts,
+                "tags": {"Device": DEVICENAME, "isMainSleep": is_main_sleep},
+                "fields": {
+                    "efficiency":            efficiency,
+                    "minutesAfterWakeup":    minutes_after_wakeup,
+                    "minutesAsleep":         minutes_asleep,
+                    "minutesToFallAsleep":   minutes_to_fall,
+                    "minutesInBed":          minutes_in_period,
+                    "minutesAwake":          minutes_awake,
+                    "minutesLight":          minutes_light,
+                    "minutesREM":            minutes_rem,
+                    "minutesDeep":           minutes_deep,
+                },
+            })
+            inserted_count += 1
+
+            # Sleep stage timeline from stages array
+            interval = sleep.get("interval", {})
+            for stage in sleep.get("stages", []):
+                stage_time_str = stage.get("startTime")
+                if not stage_time_str:
+                    continue
+                try:
+                    stage_dt = datetime.fromisoformat(stage_time_str.replace("Z", "+00:00"))
+                    stage_ts = stage_dt.astimezone(pytz.utc).isoformat()
+                except ValueError:
+                    continue
+                stage_type = stage.get("type", "UNKNOWN")
+                end_time_str = stage.get("endTime")
+                duration_secs = None
+                if end_time_str:
+                    try:
+                        end_dt = datetime.fromisoformat(end_time_str.replace("Z", "+00:00"))
+                        duration_secs = int((end_dt - stage_dt).total_seconds())
+                    except ValueError:
+                        pass
+                collected_records.append({
+                    "measurement": "Sleep Levels",
+                    "time": stage_ts,
+                    "tags": {"Device": DEVICENAME, "isMainSleep": is_main_sleep},
+                    "fields": {
+                        "level": sleep_level_mapping.get(stage_type, 4),
+                        "duration_seconds": duration_secs,
+                    },
+                })
+
+            # Wake marker at end of sleep session
+            end_time_str = interval.get("endTime")
+            if end_time_str:
+                try:
+                    wake_dt = datetime.fromisoformat(end_time_str.replace("Z", "+00:00"))
+                    wake_ts = wake_dt.astimezone(pytz.utc).isoformat()
+                    collected_records.append({
+                        "measurement": "Sleep Levels",
+                        "time": wake_ts,
+                        "tags": {"Device": DEVICENAME, "isMainSleep": is_main_sleep},
+                        "fields": {"level": sleep_level_mapping["AWAKE"], "duration_seconds": None},
+                    })
+                except ValueError:
+                    pass
+
+        if inserted_count:
+            logging.info("Recorded Sleep data for date %s to %s (Google mode): %s sessions", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No Sleep records found for date %s to %s in Google mode", start_date_str, end_date_str)
+        return
+ 
+    # --- Original Fitbit path (unchanged) ---
     sleep_data = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1.2/user/-/sleep/date/{start_date_str}/{end_date_str}.json").get("sleep")
     if sleep_data != None:
         for record in sleep_data:
             log_time = datetime.fromisoformat(record["startTime"])
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
             try:
-                minutesLight= record['levels']['summary']['light']['minutes']
-                minutesREM = record['levels']['summary']['rem']['minutes']
-                minutesDeep = record['levels']['summary']['deep']['minutes']
+                minutesLight = record['levels']['summary']['light']['minutes']
+                minutesREM   = record['levels']['summary']['rem']['minutes']
+                minutesDeep  = record['levels']['summary']['deep']['minutes']
             except:
-                minutesLight= record['levels']['summary']['asleep']['minutes']
-                minutesREM = record['levels']['summary']['restless']['minutes']
-                minutesDeep = 0
-
+                minutesLight = record['levels']['summary']['asleep']['minutes']
+                minutesREM   = record['levels']['summary']['restless']['minutes']
+                minutesDeep  = 0
+ 
             collected_records.append({
                     "measurement":  "Sleep Summary",
                     "time": utc_time,
@@ -931,7 +1265,7 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
                         'minutesDeep': minutesDeep
                     }
                 })
-            
+ 
             sleep_level_mapping = {'wake': 3, 'rem': 2, 'light': 1, 'deep': 0, 'asleep': 1, 'restless': 2, 'awake': 3, 'unknown': 4}
             for sleep_stage in record['levels']['data']:
                 log_time = datetime.fromisoformat(sleep_stage["dateTime"])
@@ -965,13 +1299,230 @@ def get_daily_data_limit_100d(start_date_str, end_date_str):
         logging.info("Recorded Sleep data for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : Sleep data for date " + start_date_str + " to " + end_date_str)
-
-# Max date range 1 year, records HR zones, Activity minutes and Resting HR - 4 + 3 + 1 + 1 = 9 queries
+ 
+ 
+# Max date range 1 year — Resting HR, HR Zones, Activity Minutes, Steps/Calories/Distance
 def get_daily_data_limit_365d(start_date_str, end_date_str):
     if HEALTH_API_PROVIDER == "google":
-        logging.warning("Google mapping for long-range activity aggregates is not finalized yet. Skipping this batch.")
-        return
+ 
+        # --- Resting Heart Rate (daily-resting-heart-rate) ---
+        # Google field: dailyRestingHeartRate → { beatsPerMinute }
+        try:
+            points = get_google_datapoints_for_date_range("daily-resting-heart-rate", start_date_str, end_date_str)
+        except requests.exceptions.HTTPError as e:
+            logging.error("Google Resting HR fetch failed: %s", str(e))
+            points = []
+        inserted_count = 0
+        for data_point, ts in points:
+            rhr_fields = data_point.get("dailyRestingHeartRate", {})
+            bpm = extract_first_numeric(rhr_fields.get("beatsPerMinute"))
+            if bpm is None:
+                continue
+            collected_records.append({
+                "measurement": "RestingHR",
+                "time": ts,
+                "tags": {"Device": DEVICENAME},
+                "fields": {"value": float(bpm)},
+            })
+            inserted_count += 1
+        if inserted_count:
+            logging.info("Recorded Resting HR for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No Resting HR records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        # --- HR Zones (active-zone-minutes dailyRollUp) ---
+        az_start = datetime.strptime(start_date_str, "%Y-%m-%d")
+        az_end   = datetime.strptime(end_date_str,   "%Y-%m-%d")
+        current  = az_start
+        inserted_count = 0
+        while current <= az_end:
+            payload = {
+                "range": {
+                    "start": {"date": {"year": current.year, "month": current.month, "day": current.day},
+                            "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0}},
+                    "end":   {"date": {"year": current.year, "month": current.month, "day": current.day},
+                            "time": {"hours": 23, "minutes": 59, "seconds": 59, "nanos": 0}},
+                },
+                "windowSizeDays": 1,
+            }
+            try:
+                response = request_google_data_points_daily_rollup("active-zone-minutes", payload)
+                rollup_points = response.get("rollupDataPoints", []) if isinstance(response, dict) else []
+                for rp in rollup_points:
+                    azm = rp.get("activeZoneMinutes", {})
+                    fields = {
+                        "Normal":   0,  # Out of Range not tracked by this endpoint
+                        "Fat Burn": int(extract_first_numeric(azm.get("sumInFatBurnHeartZone")) or 0),
+                        "Cardio":   int(extract_first_numeric(azm.get("sumInCardioHeartZone"))  or 0),
+                        "Peak":     int(extract_first_numeric(azm.get("sumInPeakHeartZone"))    or 0),
+                    }
+                    # Always write a row, even if all zeros — matches the upstream Fitbit path
+                    # and gives Grafana a continuous time series so short ranges (e.g. last 7d)
+                    # render proper daily bars instead of collapsing to a single label.
+                    ts = LOCAL_TIMEZONE.localize(current).astimezone(pytz.utc).isoformat()
+                    collected_records.append({
+                        "measurement": "HR zones",
+                        "time": ts,
+                        "tags": {"Device": DEVICENAME},
+                        "fields": fields,
+                    })
+                    inserted_count += 1
+            except Exception as e:
+                logging.warning("Google active-zone-minutes rollup failed for %s: %s", current.strftime("%Y-%m-%d"), str(e))
+            current += timedelta(days=1)
+        if inserted_count:
+            logging.info("Recorded HR Zones for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No HR Zone records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        # --- Activity Minutes via dailyRollUp (steps, total-calories, distance) ---
+        # These use the dailyRollUp POST endpoint for aggregated daily totals
+        rollup_map = [
+            # (data_type,        measurement_name,  field_name,   cast_fn)
+            ("steps",            "Total Steps",      "value",      float),
+            ("total-calories",   "calories",         "value",      float),
+        ]
+        
+        for data_type, measurement_name, field_name, cast_fn in rollup_map:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+            end_date   = datetime.strptime(end_date_str,   "%Y-%m-%d")
+            current    = start_date
+            inserted_count = 0
+            while current <= end_date:
+                next_day = current + timedelta(days=1)
+                payload = {
+                    "range": {
+                        "start": {"date": {"year": current.year, "month": current.month, "day": current.day},
+                                  "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0}},
+                        "end":   {"date": {"year": current.year, "month": current.month, "day": current.day},
+                                  "time": {"hours": 23, "minutes": 59, "seconds": 59, "nanos": 0}},
+                    },
+                    "windowSizeDays": 1,
+                }
+                try:
+                    response = request_google_data_points_daily_rollup(data_type, payload)
+                except Exception as e:
+                    logging.warning("Google dailyRollUp failed for %s on %s: %s", data_type, current.strftime("%Y-%m-%d"), str(e))
+                    current = next_day
+                    continue
+                rollup_points = response.get("rollupDataPoints", []) if isinstance(response, dict) else []
+                for rp in rollup_points:
+                    # Extract value using explicit field names to avoid picking up year from date objects
+                    value = None
+                    if data_type == "steps":
+                        value = extract_first_numeric(rp.get("steps", {}).get("countSum"))
+                    elif data_type == "total-calories":
+                        value = extract_first_numeric(rp.get("totalCalories", {}).get("kcalSum"))
+                    if value is None:
+                        continue
+                    # Timestamp: use civilStartTime from rollup point
+                    civil_start = rp.get("civilStartTime", {})
+                    date_val    = civil_start.get("date", {})
+                    try:
+                        dt = LOCAL_TIMEZONE.localize(datetime(
+                            int(date_val.get("year",  current.year)),
+                            int(date_val.get("month", current.month)),
+                            int(date_val.get("day",   current.day)),
+                        ))
+                        ts = dt.astimezone(pytz.utc).isoformat()
+                    except Exception:
+                        ts = LOCAL_TIMEZONE.localize(current).astimezone(pytz.utc).isoformat()
+                    collected_records.append({
+                        "measurement": measurement_name,
+                        "time": ts,
+                        "tags": {"Device": DEVICENAME},
+                        "fields": {field_name: cast_fn(value)},
+                    })
+                    inserted_count += 1
+                current = next_day
+            if inserted_count:
+                logging.info("Recorded %s for date %s to %s (Google mode): %s points", measurement_name, start_date_str, end_date_str, inserted_count)
+            else:
+                logging.warning("No %s records found for date %s to %s in Google mode", measurement_name, start_date_str, end_date_str)
+ 
+        # --- Distance (separate handling — nested under distance.millimetersSum) ---
+        dist_start = datetime.strptime(start_date_str, "%Y-%m-%d")
+        dist_end   = datetime.strptime(end_date_str,   "%Y-%m-%d")
+        current    = dist_start
+        inserted_count = 0
+        while current <= dist_end:
+            payload = {
+                "range": {
+                    "start": {"date": {"year": current.year, "month": current.month, "day": current.day},
+                              "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0}},
+                    "end":   {"date": {"year": current.year, "month": current.month, "day": current.day},
+                              "time": {"hours": 23, "minutes": 59, "seconds": 59, "nanos": 0}},
+                },
+                "windowSizeDays": 1,
+            }
+            try:
+                dist_response = request_google_data_points_daily_rollup("distance", payload)
+                for rp in dist_response.get("rollupDataPoints", []) if isinstance(dist_response, dict) else []:
+                    mm = extract_first_numeric(rp.get("distance", {}).get("millimetersSum"))
+                    if mm is not None:
+                        ts = LOCAL_TIMEZONE.localize(current).astimezone(pytz.utc).isoformat()
+                        collected_records.append({
+                            "measurement": "distance",
+                            "time": ts,
+                            "tags": {"Device": DEVICENAME},
+                            "fields": {"value": float(mm / 1_000_000)},  # mm → km
+                        })
+                        inserted_count += 1
+            except Exception as e:
+                logging.warning("Google distance rollup failed for %s: %s", current.strftime("%Y-%m-%d"), str(e))
+            current += timedelta(days=1)
+        if inserted_count:
+            logging.info("Recorded distance for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No distance records found for date %s to %s in Google mode", start_date_str, end_date_str)
 
+        # --- Activity Minutes (sedentary-period, active-zone-minutes) ---
+        # Using active-zone-minutes for fairlyActive + veryActive approximation
+        # minutesSedentary via sedentary-period rollup
+        sedentary_start = datetime.strptime(start_date_str, "%Y-%m-%d")
+        sedentary_end   = datetime.strptime(end_date_str,   "%Y-%m-%d")
+        current = sedentary_start
+        inserted_count = 0
+        while current <= sedentary_end:
+            payload = {
+                "range": {
+                    "start": {"date": {"year": current.year, "month": current.month, "day": current.day},
+                              "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0}},
+                    "end":   {"date": {"year": current.year, "month": current.month, "day": current.day},
+                              "time": {"hours": 23, "minutes": 59, "seconds": 59, "nanos": 0}},
+                },
+                "windowSizeDays": 1,
+            }
+            try:
+                sedentary_response = request_google_data_points_daily_rollup("sedentary-period", payload)
+                rollup_points = sedentary_response.get("rollupDataPoints", []) if isinstance(sedentary_response, dict) else []
+                total_sedentary_minutes = 0
+                for rp in rollup_points:
+                    sedentary_data = rp.get("sedentaryPeriod", {})
+                    duration = sedentary_data.get("durationSum") or sedentary_data.get("durationSeconds") or sedentary_data.get("duration")
+                    secs = convert_google_duration_to_seconds(duration)
+                    if secs is not None:
+                        total_sedentary_minutes += secs / 60
+                if total_sedentary_minutes > 0:
+                    ts = LOCAL_TIMEZONE.localize(current).astimezone(pytz.utc).isoformat()
+                    collected_records.append({
+                        "measurement": "Activity Minutes",
+                        "time": ts,
+                        "tags": {"Device": DEVICENAME},
+                        "fields": {"minutesSedentary": int(total_sedentary_minutes)},
+                    })
+                    inserted_count += 1
+            except Exception as e:
+                logging.warning("Google sedentary-period rollup failed for %s: %s", current.strftime("%Y-%m-%d"), str(e))
+            current += timedelta(days=1)
+        if inserted_count:
+            logging.info("Recorded Activity Minutes (sedentary) for date %s to %s (Google mode): %s points", start_date_str, end_date_str, inserted_count)
+        else:
+            logging.warning("No sedentary period records found for date %s to %s in Google mode", start_date_str, end_date_str)
+ 
+        return  # ← Google path done
+ 
+    # --- Original Fitbit path (unchanged) ---
     activity_minutes_list = ["minutesSedentary", "minutesLightlyActive", "minutesFairlyActive", "minutesVeryActive"]
     for activity_type in activity_minutes_list:
         activity_minutes_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/activities/tracker/{activity_type}/date/{start_date_str}/{end_date_str}.json").get("activities-tracker-"+activity_type)
@@ -992,8 +1543,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
             logging.info("Recorded " + activity_type + "for date " + start_date_str + " to " + end_date_str)
         else:
             logging.error("Recording failed : " + activity_type + " for date " + start_date_str + " to " + end_date_str)
-        
-
+ 
     activity_others_list = ["distance", "calories", "steps"]
     for activity_type in activity_others_list:
         activity_others_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/activities/tracker/{activity_type}/date/{start_date_str}/{end_date_str}.json").get("activities-tracker-"+activity_type)
@@ -1015,8 +1565,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
             logging.info("Recorded " + activity_name + " for date " + start_date_str + " to " + end_date_str)
         else:
             logging.error("Recording failed : " + activity_name + " for date " + start_date_str + " to " + end_date_str)
-        
-
+ 
     HR_zones_data_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/activities/heart/date/{start_date_str}/{end_date_str}.json").get("activities-heart")
     if HR_zones_data_list != None:
         for data in HR_zones_data_list:
@@ -1028,7 +1577,6 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                     "tags": {
                         "Device": DEVICENAME
                     },
-                    # Using get() method with a default value 0 to prevent keyerror ( see issue #31)
                     "fields": {
                         "Normal" : data["value"]["heartRateZones"][0].get("minutes", 0),
                         "Fat Burn" :  data["value"]["heartRateZones"][1].get("minutes", 0),
@@ -1050,7 +1598,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
         logging.info("Recorded RHR and HR zones for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : RHR and HR zones for date " + start_date_str + " to " + end_date_str)
-
+ 
     HR_zone_minutes_list = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/activities/active-zone-minutes/date/{start_date_str}/{end_date_str}.json").get("activities-active-zone-minutes")
     if HR_zone_minutes_list != None:
         for data in HR_zone_minutes_list:
@@ -1068,6 +1616,7 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
         logging.info("Recorded HR zone minutes for date " + start_date_str + " to " + end_date_str)
     else:
         logging.error("Recording failed : HR zone minutes for date " + start_date_str + " to " + end_date_str)
+ 
 
 # records SPO2 single days for the whole given period - 1 query
 def get_daily_data_limit_none(start_date_str, end_date_str):
@@ -1197,11 +1746,22 @@ def get_tcx_data(tcx_url, ActivityID):
 # Fetches latest activities from record ( upto last 50 )
 def fetch_latest_activities(end_date_str):
     if HEALTH_API_PROVIDER == "google":
+        # The exercise endpoint returns the most recent records first. We pull the unfiltered
+        # latest page (capped at ~50 like the Fitbit list endpoint) instead of trying to filter
+        # by date — Google rejects most member-level filters on `exercise` and a same-day filter
+        # would miss the 50-most-recent-activities semantics of the original Fitbit call.
         try:
-            points = get_google_datapoints_for_date("exercise", end_date_str, page_size=25)
+            response = request_google_data_points_list("exercise", params={"pageSize": 100})
         except requests.exceptions.HTTPError as err:
-            logging.error("Google exercise fetch failed for %s: %s", end_date_str, str(err))
-            points = []
+            logging.error("Google exercise fetch failed: %s", str(err))
+            response = None
+
+        raw_points = response.get("dataPoints", []) if isinstance(response, dict) else []
+        points = []
+        for dp in raw_points[:50]:
+            ts = parse_google_datapoint_timestamp(dp, "exercise")
+            if ts:
+                points.append((dp, ts))
 
         inserted_count = 0
         for data_point, ts in points:
@@ -1240,7 +1800,7 @@ def fetch_latest_activities(end_date_str):
                 "fields": fields
             })
             inserted_count += 1
-        logging.info("Fetched recent exercises for date %s (Google mode): %s points", end_date_str, inserted_count)
+        logging.info("Fetched recent exercises (Google mode): %s points", inserted_count)
         return
 
     next_end_date_str = (datetime.strptime(end_date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1372,7 +1932,3 @@ if SCHEDULE_AUTO_UPDATE:
             collected_records = []
         time.sleep(30)
         update_working_dates()
-        
-
-
-
