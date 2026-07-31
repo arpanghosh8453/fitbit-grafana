@@ -711,7 +711,38 @@ def update_working_dates():
 # Get last synced battery level of the device
 def get_battery_level():
     if HEALTH_API_PROVIDER == "google":
-        logging.warning("Battery level endpoint is not mapped for Google Health API yet. Skipping DeviceBatteryLevel update.")
+        try:
+            response = request_data_from_fitbit(
+                get_google_health_api_url("users/me/pairedDevices")
+            )
+        except requests.exceptions.HTTPError as err:
+            logging.error("Google pairedDevices request failed: %s", str(err))
+            return
+
+        devices = response.get("pairedDevices", [])
+        if not devices:
+            logging.warning("No paired devices found in Google Health API response")
+            return
+
+        device = devices[0]
+        for d in devices:
+            if d.get("deviceVersion", "").strip() == DEVICENAME:
+                device = d
+                break
+
+        battery_level = device.get("batteryLevel")
+        if battery_level is None:
+            logging.warning("No batteryLevel field in paired device response")
+            return
+
+        collected_records.append({
+            "measurement": "DeviceBatteryLevel",
+            "time": datetime.fromisoformat(device["lastSyncTime"].replace("Z", "+00:00")).astimezone(pytz.utc).isoformat() if device.get("lastSyncTime") else datetime.now(pytz.utc).isoformat(),
+            "fields": {
+                "value": float(battery_level)
+            }
+        })
+        logging.info("Recorded battery level for " + DEVICENAME)
         return
 
     device = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/devices.json")[0]
