@@ -262,4 +262,4 @@ If you enjoy the script and love how it works with simple setup, please consider
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=arpanghosh8453/public-fitbit-projects&type=Date)](https://www.star-history.com/#arpanghosh8453/public-fitbit-projects&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=arpanghosh8453/public-fitbit-projects&type=Date)](https://star-history.dera.page/#arpanghosh8453/public-fitbit-projects&Date)
