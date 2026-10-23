@@ -128,6 +128,11 @@ def request_google_data_points_list(data_type, params=None, suppress_http_error_
     return request_data_from_fitbit(endpoint, params=params or {}, suppress_http_error_log=suppress_http_error_log)
 
 
+def request_google_paired_devices(params=None, suppress_http_error_log=False):
+    endpoint = get_google_health_api_url("users/me/pairedDevices")
+    return request_data_from_fitbit(endpoint, params=params or {}, suppress_http_error_log=suppress_http_error_log)
+
+
 def request_google_data_points_daily_rollup(data_type, payload):
     endpoint = get_google_health_api_url(f"users/me/dataTypes/{data_type}/dataPoints:dailyRollUp")
     headers = get_default_auth_headers()
@@ -711,7 +716,55 @@ def update_working_dates():
 # Get last synced battery level of the device
 def get_battery_level():
     if HEALTH_API_PROVIDER == "google":
-        logging.warning("Battery level endpoint is not mapped for Google Health API yet. Skipping DeviceBatteryLevel update.")
+        # Google exposes battery as a device attribute, not as a data type:
+        # GET /v4/users/me/pairedDevices -> pairedDevices[].batteryLevel / lastSyncTime
+        try:
+            response = request_google_paired_devices({"pageSize": 100}, suppress_http_error_log=True)
+        except requests.exceptions.HTTPError as err:
+            logging.warning("Google pairedDevices request failed; skipping DeviceBatteryLevel update: %s", str(err))
+            return
+
+        devices = response.get("pairedDevices") if isinstance(response, dict) else None
+        if not isinstance(devices, list) or not devices:
+            logging.warning("No paired devices returned by Google Health API; skipping DeviceBatteryLevel update.")
+            return
+
+        # A user may have several paired devices (for example a tracker and a scale).
+        # Prefer the tracker, but accept any device that reports a battery level.
+        device = None
+        for candidate in devices:
+            if not isinstance(candidate, dict) or extract_first_numeric(candidate.get("batteryLevel")) is None:
+                continue
+            if candidate.get("deviceType") == "TRACKER":
+                device = candidate
+                break
+            if device is None:
+                device = candidate
+
+        if device is None:
+            logging.warning("No paired device with a battery level found in Google Health API; skipping DeviceBatteryLevel update.")
+            return
+
+        last_sync_time = device.get("lastSyncTime")
+        if not isinstance(last_sync_time, str):
+            logging.warning("Paired device %s has no lastSyncTime; skipping DeviceBatteryLevel update.", device.get("deviceVersion") or device.get("name"))
+            return
+        try:
+            sync_time = datetime.fromisoformat(last_sync_time.replace("Z", "+00:00"))
+        except ValueError:
+            logging.warning("Invalid lastSyncTime '%s' for paired device %s; skipping DeviceBatteryLevel update.", last_sync_time, device.get("deviceVersion") or device.get("name"))
+            return
+        if sync_time.tzinfo is None:
+            sync_time = LOCAL_TIMEZONE.localize(sync_time)
+
+        collected_records.append({
+            "measurement": "DeviceBatteryLevel",
+            "time": sync_time.astimezone(pytz.utc).isoformat(),
+            "fields": {
+                "value": extract_first_numeric(device.get("batteryLevel"))
+            }
+        })
+        logging.info("Recorded battery level for " + DEVICENAME)
         return
 
     device = request_data_from_fitbit(f"{FITBIT_API_BASE_URL}/1/user/-/devices.json")[0]
