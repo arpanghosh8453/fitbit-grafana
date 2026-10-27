@@ -1624,6 +1624,8 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
         for data in HR_zones_data_list:
             log_time = datetime.fromisoformat(data["dateTime"] + "T" + "00:00:00")
             utc_time = LOCAL_TIMEZONE.localize(log_time).astimezone(pytz.utc).isoformat()
+            # Fitbit can return fewer than 4 zones (e.g. for a day that has just started), pad with 0
+            zone_minutes = [zone.get("minutes", 0) for zone in data["value"].get("heartRateZones", [])] + [0, 0, 0, 0]
             collected_records.append({
                     "measurement": "HR zones",
                     "time": utc_time,
@@ -1631,10 +1633,10 @@ def get_daily_data_limit_365d(start_date_str, end_date_str):
                         "Device": DEVICENAME
                     },
                     "fields": {
-                        "Normal" : data["value"]["heartRateZones"][0].get("minutes", 0),
-                        "Fat Burn" :  data["value"]["heartRateZones"][1].get("minutes", 0),
-                        "Cardio" :  data["value"]["heartRateZones"][2].get("minutes", 0),
-                        "Peak" :  data["value"]["heartRateZones"][3].get("minutes", 0)
+                        "Normal" : zone_minutes[0],
+                        "Fat Burn" :  zone_minutes[1],
+                        "Cardio" :  zone_minutes[2],
+                        "Peak" :  zone_minutes[3]
                     }
                 })
             if "restingHeartRate" in data["value"]:
