@@ -40,6 +40,7 @@ services:
       # - GOOGLE_CLIENT_SECRET=your_google_cloud_oauth_client_secret
       - DEVICENAME=Your_Device_Name # e.g. "Charge5"
       - LOCAL_TIMEZONE=Automatic # set to "Automatic" for Automatic setup from User profile (if not mentioned here specifically). 
+      # - EXTRA_FETCH_SELECTION=vo2max,active_minutes # Optional, HEALTH_API_PROVIDER=google only. Comma separated or "all": vo2max,hrv_intraday,breathing_sleep_stages,activity_level,active_minutes,hr_zone_time,active_calories,swim,nutrition,hydration,exercise_gps (see extra/google-migration.md)
     depends_on:
       - influxdb             
 

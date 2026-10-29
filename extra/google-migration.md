@@ -40,6 +40,7 @@ Google uses URL scopes. Use only what you need. Typical read-only scopes for thi
 - `https://www.googleapis.com/auth/googlehealth.location.readonly`
 - `https://www.googleapis.com/auth/googlehealth.profile.readonly`
 - `https://www.googleapis.com/auth/googlehealth.settings.readonly`
+- `https://www.googleapis.com/auth/googlehealth.nutrition.readonly` (only for the `nutrition` and `hydration` values of `EXTRA_FETCH_SELECTION`, see below)
 
 ## 2) Configure Google Cloud (Client ID / Secret)
 
@@ -104,6 +105,26 @@ Existing variables still required for database/write pipeline:
 Optional for local validation without DB writes:
 
 - `DRY_RUN_MODE=true` but this will skip any database writes so don't use this for actual migration.
+
+### Optional extra data (`EXTRA_FETCH_SELECTION`)
+
+The Google Health API exposes more data than the default dashboard uses. These extra data types are **off by default**, so an existing setup keeps making the same API calls. Enable the ones you want with a comma separated list, for example `EXTRA_FETCH_SELECTION=vo2max,active_minutes,hr_zone_time`, or `EXTRA_FETCH_SELECTION=all`. They are fetched every 3 hours in the regular update and in 28-day chunks during a bulk update. This variable is ignored with `HEALTH_API_PROVIDER=fitbit`.
+
+| Value | Google data type(s) | Measurement written | Notes |
+| --- | --- | --- | --- |
+| `vo2max` | `daily-vo2-max`, `vo2-max`, `run-vo2-max` | `VO2 Max` (tag `Type`: `daily`, `measured`, `run`) | Cardio Fitness score |
+| `hrv_intraday` | `heart-rate-variability` | `HRV_Intraday` | Individual HRV samples (`HRV` keeps the nightly summary) |
+| `breathing_sleep_stages` | `respiratory-rate-sleep-summary` | `BreathingRate_Sleep` | Breathing rate per sleep stage, one point per sleep |
+| `activity_level` | `activity-level` | `ActivityLevel_Intraday` | Minute level, 0 = sedentary to 3 = very active |
+| `active_minutes` | `active-minutes` | `Activity Minutes` | Adds `minutesLightlyActive`, `minutesFairlyActive`, `minutesVeryActive` (same fields as Fitbit mode) |
+| `hr_zone_time` | `time-in-heart-rate-zone`, `calories-in-heart-rate-zone`, `daily-heart-rate-zones` | `HR zone time`, `HR zone calories`, `HR zone limits` | Minutes, kcal and bpm boundaries per zone |
+| `active_calories` | `active-energy-burned` | `Active Calories` | Daily active kcal (`calories` is the total) |
+| `swim` | `swim-lengths-data` | `Swim` | Daily lengths, strokes and swim time |
+| `nutrition` | `nutrition-log` | `Nutrition` | Food logged in the Fitbit app. Needs the `nutrition.readonly` scope |
+| `hydration` | `hydration-log` | `Hydration` | Water logged in the Fitbit app (ml). Needs the `nutrition.readonly` scope |
+| `exercise_gps` | `exercise` (`exportExerciseTcx`) | `GPS` | GPS track of exercises recorded with GPS (up to 10 per run). Needs the `location.readonly` scope |
+
+The default Grafana dashboard has no panels for these measurements; build your own panels to visualize them. A data type your device does not record simply returns no points.
 
 ## 5) First Run / Token Bootstrap
 
