@@ -49,6 +49,7 @@ A script to fetch data from Fitbit servers using their API and store the data in
   - How to obtain refresh token from parity tool Settings
   - Compose/env changes (`HEALTH_API_PROVIDER=google`)
   - Historical fetch validation and troubleshooting
+  - Optional extra data (VO2 max, intraday HRV, active minutes, time in heart rate zones, GPS, ...) with the `EXTRA_FETCH_SELECTION` variable
 
 If you are starting a new setup now, follow the Google migration guide first and use Google credentials instead of creating a legacy Fitbit-only OAuth app.
 
