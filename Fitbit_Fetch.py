@@ -2123,15 +2123,19 @@ def record_tcx_trackpoints(tcx_text, ActivityID):
 # Fetches latest activities from record ( upto last 50 )
 def fetch_latest_activities(end_date_str):
     if HEALTH_API_PROVIDER == "google":
-        # The exercise endpoint returns the most recent records first. We pull the unfiltered
-        # latest page (capped at ~50 like the Fitbit list endpoint) instead of trying to filter
-        # by date — Google rejects most member-level filters on `exercise` and a same-day filter
-        # would miss the 50-most-recent-activities semantics of the original Fitbit call.
+        # The exercise endpoint returns the most recent records first. Like the Fitbit call
+        # (beforeDate=end_date + 1 day, limit 50), fetch the 50 latest exercises that started
+        # before the day after end_date, so a bulk update of an older range gets that range's
+        # exercises. Falls back to the unfiltered latest page if the filter is rejected.
+        next_end_date_str = (datetime.strptime(end_date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
         try:
-            response = request_google_data_points_list("exercise", params={"pageSize": 100})
-        except requests.exceptions.HTTPError as err:
-            logging.error("Google exercise fetch failed: %s", str(err))
-            response = None
+            response = request_google_data_points_list("exercise", params={"pageSize": 50, "filter": f'exercise.interval.civil_start_time < "{next_end_date_str}T00:00:00"'}, suppress_http_error_log=True)
+        except requests.exceptions.HTTPError:
+            try:
+                response = request_google_data_points_list("exercise", params={"pageSize": 50})
+            except requests.exceptions.HTTPError as err:
+                logging.error("Google exercise fetch failed: %s", str(err))
+                response = None
 
         raw_points = response.get("dataPoints", []) if isinstance(response, dict) else []
         points = []
@@ -2147,10 +2151,19 @@ def fetch_latest_activities(end_date_str):
             fields = {}
             metrics_summary = exercise_payload.get("metricsSummary", {}) if isinstance(exercise_payload, dict) else {}
 
+            # Durations in milliseconds, like the Fitbit activity list (the dashboard unit is ms):
+            # duration is the elapsed time of the exercise, ActiveDuration excludes pauses.
             active_duration_seconds = convert_google_duration_to_seconds(exercise_payload.get("activeDuration"))
             if active_duration_seconds is not None:
-                fields["ActiveDuration"] = int(active_duration_seconds)
-                fields["duration"] = int(active_duration_seconds)
+                fields["ActiveDuration"] = int(active_duration_seconds * 1000)
+                fields["duration"] = int(active_duration_seconds * 1000)
+            interval = exercise_payload.get("interval", {}) if isinstance(exercise_payload, dict) else {}
+            try:
+                elapsed = datetime.fromisoformat(interval["endTime"].replace("Z", "+00:00")) - datetime.fromisoformat(interval["startTime"].replace("Z", "+00:00"))
+                if elapsed.total_seconds() > 0:
+                    fields["duration"] = int(elapsed.total_seconds() * 1000)
+            except (KeyError, TypeError, ValueError):
+                pass
 
             average_hr = extract_first_numeric(metrics_summary.get("averageHeartRateBeatsPerMinute"))
             if average_hr is not None:
@@ -2164,9 +2177,10 @@ def fetch_latest_activities(end_date_str):
             if steps_count is not None:
                 fields["steps"] = int(steps_count)
 
-            distance_value = extract_first_numeric(metrics_summary.get("distanceMeters"))
-            if distance_value is not None:
-                fields["distance"] = float(distance_value)
+            # Google reports millimeters; the Fitbit path and the daily distance measurement use km
+            distance_mm = extract_first_numeric(metrics_summary.get("distanceMillimeters"))
+            if distance_mm is not None:
+                fields["distance"] = float(distance_mm / 1_000_000)
 
             extracted_activity_name = exercise_payload.get("displayName") or exercise_payload.get("exerciseType") or "Unknown-Activity"
             collected_records.append({
