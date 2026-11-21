@@ -1,5 +1,6 @@
 # %%
-import base64, requests, schedule, time, json, pytz, logging, os, sys
+import base64, requests, schedule, time, json, pytz, logging, os, sys, threading, hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from requests.exceptions import ConnectionError
 from datetime import datetime, timedelta, timezone
 # for influxdb 1.x
@@ -59,6 +60,10 @@ SERVER_ERROR_MAX_RETRY = 3
 EXPIRED_TOKEN_MAX_RETRY = 5
 SKIP_REQUEST_ON_SERVER_ERROR = True
 DRY_RUN_MODE = str(os.environ.get("DRY_RUN_MODE", "False")).lower() in ["true", "1", "yes", "y"]
+REFRESH_TRIGGER_PORT = os.environ.get("REFRESH_TRIGGER_PORT") or "" # optional, e.g. 8080 : listen for POST /refresh to fetch the recent data right away (only with the scheduled auto update). Unset : no listener
+REFRESH_TRIGGER_TOKEN = os.environ.get("REFRESH_TRIGGER_TOKEN") or "" # optional, when set a refresh request must send "Authorization: Bearer <token>"
+REFRESH_TRIGGER_MIN_INTERVAL_SECONDS = int(os.environ.get("REFRESH_TRIGGER_MIN_INTERVAL_SECONDS") or 60) # a request within this many seconds of the last refresh gets its result without fetching again
+REFRESH_TRIGGER_TIMEOUT_SECONDS = 300 # how long a refresh request waits for the fetch to finish
 LOG_LEVEL_NAME = (os.environ.get("LOG_LEVEL") or "DEBUG").strip().upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, None)
 if not isinstance(LOG_LEVEL, int):
@@ -1964,6 +1969,115 @@ else:
     print("Bulk update complete!")
 
 # %% [markdown]
+# ## Optional refresh trigger (fetch the recent data on request)
+
+# %%
+# With REFRESH_TRIGGER_PORT set, an HTTP POST /refresh fetches yesterday's and today's data right away
+# (for example just after the phone app synced) instead of waiting for the next scheduled update.
+# The fetch runs in the main loop below, like the scheduled ones; the request waits for it to finish.
+class RefreshTrigger:
+    def __init__(self):
+        self.requested = threading.Event()
+        self.condition = threading.Condition()
+        self.pending = False
+        self.finished = 0 # number of refreshes done
+        self.last_finished_at = None
+        self.last_result = None # (succeeded, number of records)
+
+    def wait_for_refresh(self, timeout):
+        with self.condition:
+            if self.pending:
+                logging.info("Refresh trigger : refresh requested, joining the one in progress")
+            elif self.last_finished_at is not None and time.monotonic() - self.last_finished_at < REFRESH_TRIGGER_MIN_INTERVAL_SECONDS:
+                logging.info("Refresh trigger : refresh requested, last one is recent, not fetching again")
+                return self.last_result
+            else:
+                logging.info("Refresh trigger : refresh requested")
+                self.pending = True
+                self.requested.set()
+            target = self.finished + 1 # the refresh in progress (or about to start) is shared
+            if self.condition.wait_for(lambda: self.finished >= target, timeout):
+                return self.last_result
+            return None
+
+    def done(self, succeeded, records):
+        with self.condition:
+            self.pending = False
+            self.finished += 1
+            self.last_finished_at = time.monotonic()
+            self.last_result = (succeeded, records)
+            self.condition.notify_all()
+
+refresh_trigger = RefreshTrigger()
+
+def run_requested_refresh():
+    global collected_records
+    if not refresh_trigger.requested.is_set():
+        return
+    refresh_trigger.requested.clear()
+    succeeded, records = True, 0
+    try:
+        update_working_dates()
+        yesterday_str = (datetime.strptime(end_date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        for date_str in (yesterday_str, end_date_str):
+            get_intraday_data_limit_1d(date_str, [('heart','HeartRate_Intraday','1sec'),('steps','Steps_Intraday','1min')])
+        get_daily_data_limit_30d(yesterday_str, end_date_str)
+        get_daily_data_limit_100d(yesterday_str, end_date_str)
+        get_daily_data_limit_365d(yesterday_str, end_date_str)
+        fetch_latest_activities(end_date_str)
+        records = len(collected_records)
+        write_points_to_influxdb(collected_records)
+        collected_records = []
+        logging.info(f"Refresh trigger : fetched {records} records for {yesterday_str} to {end_date_str}")
+    except Exception as err:
+        succeeded = False
+        logging.error("Refresh trigger : fetch failed : " + str(err))
+    refresh_trigger.done(succeeded, records)
+
+class RefreshRequestHandler(BaseHTTPRequestHandler):
+    def reply(self, status, body):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        if status == 405:
+            self.send_header("Allow", "POST")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/refresh":
+            return self.reply(404, {"status": "not found"})
+        if REFRESH_TRIGGER_TOKEN:
+            supplied = self.headers.get("Authorization", "").encode()
+            if not hmac.compare_digest(supplied, ("Bearer " + REFRESH_TRIGGER_TOKEN).encode()):
+                logging.warning("Refresh trigger : request refused (missing or wrong token)")
+                return self.reply(401, {"status": "unauthorized"})
+        result = refresh_trigger.wait_for_refresh(REFRESH_TRIGGER_TIMEOUT_SECONDS)
+        if result is None:
+            return self.reply(504, {"status": "timeout"})
+        succeeded, records = result
+        if not succeeded:
+            return self.reply(500, {"status": "error"})
+        return self.reply(200, {"status": "ok", "records": records})
+
+    def do_GET(self):
+        if self.path.split("?")[0] != "/refresh":
+            return self.reply(404, {"status": "not found"})
+        return self.reply(405, {"status": "method not allowed"})
+
+    def log_message(self, format, *args):
+        pass # one log line per request is written above, no access log
+
+def start_refresh_trigger():
+    if not REFRESH_TRIGGER_PORT:
+        return
+    server = ThreadingHTTPServer(("0.0.0.0", int(REFRESH_TRIGGER_PORT)), RefreshRequestHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logging.info(f"Refresh trigger : listening on port {REFRESH_TRIGGER_PORT} for POST /refresh" + ("" if REFRESH_TRIGGER_TOKEN else " (no token set)"))
+
+# %% [markdown]
 # ## Schedule functions at specific intervals (Ongoing continuous update)
 
 # %%
@@ -1980,10 +2094,13 @@ if SCHEDULE_AUTO_UPDATE:
     schedule.every(6).hours.do(lambda : get_daily_data_limit_none(start_date_str, end_date_str))
     schedule.every(1).hours.do( lambda : fetch_latest_activities(end_date_str))
 
+    start_refresh_trigger()
+
     while True:
         schedule.run_pending()
         if len(collected_records) != 0:
             write_points_to_influxdb(collected_records)
             collected_records = []
-        time.sleep(30)
+        refresh_trigger.requested.wait(30) # same as sleeping 30 seconds, unless a refresh is requested
         update_working_dates()
+        run_requested_refresh()
