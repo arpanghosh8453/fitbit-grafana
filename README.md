@@ -237,6 +237,28 @@ Finally, add the influxdb database as a Data source in Grafana, please use the [
 
 You can use the [Fitbit_Fetch_Autostart.service](https://github.com/arpanghosh8453/public-fitbit-projects/blob/main/extra/Fitbit_Fetch_Autostart.service) template to set up an auto-starting ( and auto-restarting in case of temporary failure ) service in Linux based system ( or WSL )
 
+## Refresh on demand (optional)
+
+The script fetches new data on its own schedule (heart rate and steps every 3 minutes, workouts every hour, sleep every 4 hours...). Data your phone app has just synced can therefore take a while to show up. With `REFRESH_TRIGGER_PORT` set, another tool (a dashboard button, a home automation, a shortcut on your phone) can ask for an immediate refetch instead of waiting for the next scheduled one.
+
+| Variable | Default | Description |
+|---|---|---|
+| `REFRESH_TRIGGER_PORT` | unset | Port to listen on, e.g. `8080`. Unset: no listener, nothing changes. Only used with the scheduled auto update (the default mode, not the historical bulk update). |
+| `REFRESH_TRIGGER_TOKEN` | unset | When set, a request must send the header `Authorization: Bearer <token>`, otherwise it gets `401`. Set it whenever the port can be reached by anything other than the tool you trust. |
+| `REFRESH_TRIGGER_MIN_INTERVAL_SECONDS` | `60` | A request within this many seconds of the last refresh gets that refresh's result back without fetching again, so repeated clicks don't use up the API rate limit. |
+
+`POST /refresh` (no body) refetches yesterday's and today's intraday heart rate and steps, the daily data (sleep, HRV, resting heart rate, SpO2, breathing rate, skin temperature, zones, steps, calories...) and the latest workouts, writes them to InfluxDB, then answers:
+
+- `200` with `{"status": "ok", "records": N}` once the data is written (the request waits for the fetch, up to 5 minutes);
+- `500` with `{"status": "error"}` if the fetch failed (see the logs), `504` with `{"status": "timeout"}` if it took longer than 5 minutes;
+- `401` for a missing or wrong token, `405` for a `GET`, `404` for any other path.
+
+Requests that arrive while a refresh is running share it. The fetch runs in the main loop, between the scheduled updates, so it never overlaps with one. Remember to publish the port (for example `ports: - '8080:8080'` in `compose.yml`) if the caller is outside the container's network. Example:
+
+```bash
+curl -X POST -H "Authorization: Bearer $REFRESH_TRIGGER_TOKEN" http://localhost:8080/refresh
+```
+
 ## Troubleshooting
 
 - If you are getting `KeyError: 'activities-heart-intraday'` please double check if your Fitbit Oauth application is set as `personal` type before you open an issue
